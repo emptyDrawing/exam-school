@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>평가 관리</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" integrity="sha384-GFr3yTh5lJznCbZfpTtXnwboFsxqtTQoeTZCRHhE0579KrRmlCzen5AA8ohaB5ug" crossorigin="anonymous"></script>
+<script src="config.js"></script>
+<script src="api.js"></script>
+</head>
+<body>
+<div id="demo"></div>
+<div class="wrap wide">
+  <header class="top">
+    <h1>평가 관리 (교사)</h1>
+    <div class="who" id="who"></div>
+  </header>
+  <div id="msg"></div>
+  <nav class="tabs" id="tabs" hidden></nav>
+  <main id="main"><p class="muted">불러오는 중…</p></main>
+</div>
+
+<script>
+const api = window.ExamApi;
+const T = api.teacher;
+const $main = document.getElementById('main');
+const $msg = document.getElementById('msg');
+const $who = document.getElementById('who');
+const $tabs = document.getElementById('tabs');
+
+let exams = [];
+let currentExamId = null;
+let msgTimer = null;
+
+function show(...nodes) { $main.replaceChildren(...nodes); }
+function notice(text, kind = 'error') {
+  clearTimeout(msgTimer);
+  $msg.replaceChildren(text ? h('div', { class: 'notice ' + kind }, text) : '');
+  if (text && kind === 'ok') msgTimer = setTimeout(() => notice(''), 3000);
+}
+async function guard(fn) {
+  try { return await fn(); } catch (e) { notice(e.message); throw e; }
+}
+
+if (api.demo) {
+  document.getElementById('demo').append(h('div', { class: 'demo-bar' },
+    '데모 모드: 이 브라우저 안에서만 동작합니다.',
+    h('button', { onclick: () => { api.resetDemo(); location.reload(); } }, '데모 초기화'),
+    h('a', { href: 'index.html' + location.search, class: 'btn', style: 'font-size:12px;padding:2px 8px;margin-left:6px' }, '학생 화면')));
+}
+
+// ---------- 시작 ----------
+async function boot() {
+  const user = await api.user();
+  if (!user) {
+    return show(h('div', { class: 'card center' },
+      h('h2', {}, '교사 로그인'),
+      h('p', { class: 'muted small' }, 'DB의 teachers 테이블에 등록된 구글 계정만 들어올 수 있습니다.'),
+      h('button', { class: 'primary big', onclick: () => api.signIn().catch((e) => notice(e.message)) }, 'Google로 로그인')));
+  }
+  $who.replaceChildren(user.email,
+    h('a', { href: 'index.html' + location.search, class: 'btn' }, '학생 화면'),
+    h('button', { onclick: async () => { await api.signOut(); location.reload(); } }, '로그아웃'));
+  const st = await guard(() => api.status());
+  if (!st.is_teacher) {
+    return show(h('div', { class: 'card' }, h('h2', {}, '교사 계정이 아닙니다'),
+      h('p', {}, `${user.email} 은(는) 교사로 등록되어 있지 않습니다. Supabase 의 teachers 테이블에 이 이메일을 추가하세요.`)));
+  }
+  exams = await guard(() => T.exams());
+  currentExamId = exams[0]?.id ?? null;
+  const tabs = [['students', '학생 승인'], ['exams', '시험 · 문항'], ['results', '결과']];
+  $tabs.hidden = false;
+  $tabs.replaceChildren(...tabs.map(([k, label]) => h('button', { 'data-k': k, onclick: () => go(k) }, label)));
+  go(location.hash.slice(1) || 'students');
+}
+
+function go(tab) {
+  location.hash = tab;
+  notice('');
+  for (const b of $tabs.children) b.classList.toggle('on', b.dataset.k === tab);
+  ({ students: renderStudents, exams: renderExams, results: renderResults }[tab] || renderStudents)();
+}
+
+// ---------- 학생 승인 ----------
+async function renderStudents() {
+  const list = await guard(() => T.students());
+  const pending = list.filter((s) => !s.approved);
+
+  const rows = list.slice().sort((a, b) => (a.approved - b.approved) || a.class_no - b.class_no || a.student_no - b.student_no).map((s) =>
+    h('tr', {},
+      h('td', {}, `${s.class_no}반`), h('td', {}, `${s.student_no}번`), h('td', {}, s.email),
+      h('td', {}, fmtDate(s.created_at)),
+      h('td', {}, h('span', { class: 'badge ' + (s.approved ? 'ok' : 'warn') }, s.approved ? '승인' : '대기')),
+      h('td', {}, h('div', { class: 'row' },
+        h('button', { onclick: async () => { await guard(() => T.setApproved(s.user_id, !s.approved)); renderStudents(); } }, s.approved ? '승인 취소' : '승인'),
+        h('button', { class: 'danger', onclick: async () => {
+          if (!confirm(`${s.class_no}반 ${s.student_no}번 (${s.email}) 을 삭제할까요?\n이 학생의 제출 기록도 함께 삭제됩니다.`)) return;
+          await guard(() => T.removeStudent(s.user_id)); renderStudents();
+        } }, '삭제')))));
+
+  show(h('div', { class: 'card' },
+    h('div', { class: 'row' },
+      h('h2', { style: 'margin:0' }, `학생 ${list.length}명`),
+      h('span', { class: 'muted small' }, `승인 대기 ${pending.length}명`),
+      h('span', { class: 'spacer' }),
+      h('button', { onclick: renderStudents }, '새로고침'),
+      h('button', { class: 'primary', disabled: !pending.length, onclick: async () => {
+        if (!confirm(`대기 중인 ${pending.length}명을 모두 승인할까요?\n반·번호와 이메일이 맞는지 먼저 확인하세요.`)) return;
+        for (const s of pending) await guard(() => T.setApproved(s.user_id, true));
+        notice(`${pending.length}명을 승인했습니다.`, 'ok'); renderStudents();
+      } }, '대기 중 모두 승인')),
+    h('p', { class: 'muted small' }, '반·번호를 잘못 등록한 학생은 삭제하면 다시 등록할 수 있습니다.'),
+    h('div', { class: 'table-wrap' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['반', '번호', '이메일', '등록', '상태', ''].map((t) => h('th', {}, t)))),
+      h('tbody', {}, rows.length ? rows : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '아직 등록한 학생이 없습니다.')))))));
+}
+
+// ---------- 시험 · 문항 ----------
+const toLocal = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso), p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+const fromLocal = (v) => (v ? new Date(v).toISOString() : null);
+
+function examPicker(onChange) {
+  return h('select', { onchange: (ev) => { currentExamId = ev.target.value; onChange(); } },
+    exams.map((e) => h('option', { value: e.id, selected: e.id === currentExamId }, `${e.is_open ? '● ' : ''}${e.title}`)));
+}
+
+async function renderExams() {
+  const exam = exams.find((e) => e.id === currentExamId);
+  const top = h('div', { class: 'card' },
+    h('div', { class: 'row' },
+      exams.length ? examPicker(renderExams) : h('span', { class: 'muted' }, '시험이 없습니다.'),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'primary', onclick: async () => {
+        const title = prompt('새 시험 이름', '1단원 형성평가');
+        if (!title) return;
+        const row = await guard(() => T.saveExam({ title, max_attempts: 1, reveal: 'score', shuffle_questions: false, shuffle_options: false, is_open: false, starts_at: null, ends_at: null }));
+        exams.unshift(row); currentExamId = row.id; renderExams();
+      } }, '+ 새 시험')));
+  if (!exam) return show(top);
+
+  // 시험 설정
+  const f = {
+    title: h('input', { value: exam.title }),
+    starts_at: h('input', { type: 'datetime-local', value: toLocal(exam.starts_at) }),
+    ends_at: h('input', { type: 'datetime-local', value: toLocal(exam.ends_at) }),
+    max_attempts: h('input', { type: 'number', min: 1, value: exam.max_attempts }),
+    reveal: h('select', {},
+      [['score', '점수만 보여주기'], ['detail', '점수 + 문항별 O/X'], ['none', '보여주지 않기']]
+        .map(([v, t]) => h('option', { value: v, selected: exam.reveal === v }, t))),
+    shuffle_questions: h('input', { type: 'checkbox', checked: exam.shuffle_questions }),
+    shuffle_options: h('input', { type: 'checkbox', checked: exam.shuffle_options }),
+    is_open: h('input', { type: 'checkbox', checked: exam.is_open }),
+  };
+  const settings = h('div', { class: 'card' },
+    h('h2', {}, '시험 설정'),
+    h('div', { class: 'grid2' },
+      h('label', { class: 'field' }, '시험 이름', f.title),
+      h('label', { class: 'field' }, '응시 가능 횟수', f.max_attempts),
+      h('label', { class: 'field' }, '시작 (비우면 제한 없음)', f.starts_at),
+      h('label', { class: 'field' }, '마감 (비우면 제한 없음)', f.ends_at),
+      h('label', { class: 'field' }, '제출 후 학생에게', f.reveal)),
+    h('div', { class: 'row', style: 'margin:14px 0' },
+      h('label', { class: 'row' }, f.is_open, h('b', {}, '학생에게 공개')),
+      h('label', { class: 'row' }, f.shuffle_questions, '문항 순서 섞기'),
+      h('label', { class: 'row' }, f.shuffle_options, '보기 순서 섞기')),
+    h('div', { class: 'row' },
+      h('button', { class: 'primary', onclick: async () => {
+        const row = {
+          id: exam.id, title: f.title.value.trim() || exam.title,
+          starts_at: fromLocal(f.starts_at.value), ends_at: fromLocal(f.ends_at.value),
+          max_attempts: Math.max(1, Number(f.max_attempts.value) || 1), reveal: f.reveal.value,
+          shuffle_questions: f.shuffle_questions.checked, shuffle_options: f.shuffle_options.checked, is_open: f.is_open.checked,
+        };
+        const saved = await guard(() => T.saveExam(row));
+        exams[exams.findIndex((e) => e.id === exam.id)] = saved;
+        notice('저장했습니다.', 'ok'); renderExams();
+      } }, '설정 저장'),
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'danger', onclick: async () => {
+        if (!confirm(`'${exam.title}' 을(를) 삭제할까요?\n문항과 모든 제출 기록이 함께 삭제됩니다.`)) return;
+        await guard(() => T.deleteExam(exam.id));
+        exams = exams.filter((e) => e.id !== exam.id); currentExamId = exams[0]?.id ?? null; renderExams();
+      } }, '시험 삭제')));
+
+  // 문항
+  const qs = await guard(() => T.questions(exam.id));
+  const qTable = h('div', { class: 'table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['번호', '유형', '문제', '보기', '정답', '배점'].map((t) => h('th', {}, t)))),
+    h('tbody', {}, qs.length ? qs.map((q) => h('tr', {},
+      h('td', {}, q.num), h('td', {}, q.kind === 'choice' ? '객관식' : '단답형'),
+      h('td', { class: 'wrap-text' }, q.prompt),
+      h('td', { class: 'wrap-text muted' }, [q.opt1, q.opt2, q.opt3, q.opt4, q.opt5].filter(Boolean).map((o, i) => `${i + 1}) ${o}`).join('  ')),
+      h('td', {}, q.answer), h('td', {}, Number(q.points))))
+      : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '문항이 없습니다. 아래에 붙여 넣어 등록하세요.')))));
+
+  const area = h('textarea', { placeholder: '구글 시트/엑셀에서 표를 복사(Ctrl+C)해서 여기에 붙여 넣기(Ctrl+V)' });
+  const preview = h('div', { class: 'small muted' });
+  area.addEventListener('input', () => {
+    try { const rows = parseQuestions(area.value); preview.textContent = rows.length ? `✓ ${rows.length}문항 인식 (총 ${rows.reduce((s, r) => s + r.points, 0)}점)` : ''; preview.style.color = ''; }
+    catch (e) { preview.textContent = e.message; preview.style.color = 'var(--bad)'; }
+  });
+  const paste = h('div', { class: 'card' },
+    h('h2', {}, `문항 ${qs.length}개 · 총 ${qs.reduce((s, q) => s + Number(q.points), 0)}점`),
+    qTable,
+    h('h2', { style: 'margin-top:24px' }, '문항 붙여넣기 (전체 교체)'),
+    h('p', { class: 'small muted' },
+      '열 순서: 번호 | 유형(객관식/단답형) | 문제 | 보기1 | 보기2 | 보기3 | 보기4 | 보기5 | 정답 | 배점 — 첫 줄이 제목이면 자동으로 건너뜁니다. ',
+      '객관식 정답은 보기 번호(복수정답은 2|4), 단답형 정답은 글자(여러 답 허용은 서울|서울특별시, 띄어쓰기·대소문자 무시).'),
+    area, preview,
+    h('div', { class: 'row', style: 'margin-top:10px' },
+      h('button', { onclick: () => {
+        area.value = '번호\t유형\t문제\t보기1\t보기2\t보기3\t보기4\t보기5\t정답\t배점\n'
+          + '1\t객관식\t다음 중 소수는?\t4\t6\t7\t9\t\t3\t2\n'
+          + '2\t객관식\t짝수를 고르시오.\t1\t2\t3\t4\t\t2|4\t2\n'
+          + '3\t단답형\t대한민국의 수도는?\t\t\t\t\t\t서울|서울특별시\t3\n';
+        area.dispatchEvent(new Event('input'));
+      } }, '예시 넣기'),
+      h('button', { class: 'primary', onclick: async () => {
+        let rows;
+        try { rows = parseQuestions(area.value); } catch (e) { return notice(e.message); }
+        if (!rows.length) return notice('붙여 넣은 문항이 없습니다.');
+        if (!confirm(`기존 문항 ${qs.length}개를 지우고 ${rows.length}개로 교체할까요?` + (exam.is_open ? '\n⚠ 학생에게 공개 중인 시험입니다.' : '') + '\n이미 제출된 결과는 다시 채점되지 않습니다.')) return;
+        await guard(() => T.replaceQuestions(exam.id, rows));
+        notice(`${rows.length}문항을 등록했습니다.`, 'ok'); renderExams();
+      } }, '문항 교체')));
+
+  show(top, settings, paste);
+}
+
+// 구글 시트에서 복사한 탭 구분 텍스트를 읽는다. 셀 안 줄바꿈("...")도 처리.
+function parseTSV(text) {
+  const rows = []; let row = [], cell = '', i = 0, quoted = false;
+  text = text.replace(/\r\n?/g, '\n');
+  while (i < text.length) {
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { cell += '"'; i += 2; continue; }
+      if (c === '"') { quoted = false; i++; continue; }
+      cell += c; i++; continue;
+    }
+    if (c === '"' && cell === '') { quoted = true; i++; continue; }
+    if (c === '\t') { row.push(cell); cell = ''; i++; continue; }
+    if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; i++; continue; }
+    cell += c; i++;
+  }
+  if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c.trim() !== ''));
+}
+
+function parseQuestions(text) {
+  const rows = parseTSV(text);
+  if (rows.length && isNaN(Number(rows[0][0]))) rows.shift(); // 제목 줄
+  const seen = new Set();
+  return rows.map((r, idx) => {
+    const line = `${idx + 1}번째 줄`;
+    const [num, kindRaw, prompt, o1, o2, o3, o4, o5, answer, points] = r.map((c) => (c ?? '').trim());
+    const n = Number(num);
+    if (!Number.isInteger(n) || n < 1) throw new Error(`${line}: 번호가 숫자가 아닙니다.`);
+    if (seen.has(n)) throw new Error(`${line}: 번호 ${n}이(가) 중복됩니다.`);
+    seen.add(n);
+    const kind = /단답|short|주관/i.test(kindRaw) ? 'short' : 'choice';
+    if (!prompt) throw new Error(`${line}: 문제가 비어 있습니다.`);
+    if (!answer) throw new Error(`${line}: 정답이 비어 있습니다.`);
+    const opts = [o1, o2, o3, o4, o5].map((o) => o || null);
+    if (kind === 'choice') {
+      const count = opts.filter(Boolean).length;
+      if (count < 2) throw new Error(`${line}: 객관식인데 보기가 2개 미만입니다.`);
+      for (const a of answer.replace(/\s+/g, '').split('|')) {
+        if (!/^[1-5]$/.test(a) || !opts[Number(a) - 1]) throw new Error(`${line}: 객관식 정답은 있는 보기의 번호(1~5)여야 합니다. (현재: ${answer})`);
+      }
+    }
+    const p = points === '' || points == null ? 1 : Number(points);
+    if (!(p >= 0)) throw new Error(`${line}: 배점이 숫자가 아닙니다.`);
+    return {
+      num: n, kind, prompt,
+      opt1: kind === 'choice' ? opts[0] : null, opt2: kind === 'choice' ? opts[1] : null,
+      opt3: kind === 'choice' ? opts[2] : null, opt4: kind === 'choice' ? opts[3] : null,
+      opt5: kind === 'choice' ? opts[4] : null,
+      answer, points: p,
+    };
+  });
+}
+
+// ---------- 결과 ----------
+async function renderResults() {
+  if (!exams.length) return show(h('div', { class: 'card muted' }, '시험이 없습니다.'));
+  if (!exams.some((e) => e.id === currentExamId)) currentExamId = exams[0].id;
+  const exam = exams.find((e) => e.id === currentExamId);
+  const [subs, qs] = await Promise.all([guard(() => T.submissions(exam.id)), guard(() => T.questions(exam.id))]);
+
+  const bestOnly = h('input', { type: 'checkbox', checked: sessionStorage.getItem('bestOnly') !== '0' });
+  bestOnly.addEventListener('change', () => { sessionStorage.setItem('bestOnly', bestOnly.checked ? '1' : '0'); renderResults(); });
+
+  let list = subs.slice().sort((a, b) => (a.students?.class_no - b.students?.class_no) || (a.students?.student_no - b.students?.student_no) || a.attempt - b.attempt);
+  if (bestOnly.checked) {
+    const best = new Map();
+    for (const s of list) { const cur = best.get(s.user_id); if (!cur || Number(s.score) > Number(cur.score)) best.set(s.user_id, s); }
+    list = list.filter((s) => best.get(s.user_id) === s);
+  }
+
+  const nums = qs.map((q) => q.num);
+  const avg = list.length ? list.reduce((s, x) => s + Number(x.score), 0) / list.length : 0;
+  const total = list[0] ? Number(list[0].total) : qs.reduce((s, q) => s + Number(q.points), 0);
+  const rate = nums.map((n) => {
+    const hits = list.filter((x) => x.detail.find((d) => d.num === n)?.ok).length;
+    return list.length ? Math.round((hits / list.length) * 100) : 0;
+  });
+
+  const okMark = (x, n) => { const d = x.detail.find((d) => d.num === n); return d ? (d.ok ? 'O' : 'X') : '-'; };
+  const table = h('div', { class: 'table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['반', '번호', '회차', '점수', '제출', ...nums.map((n) => `${n}번`)].map((t) => h('th', {}, t)))),
+    h('tbody', {},
+      list.length ? list.map((x) => h('tr', {},
+        h('td', {}, x.students?.class_no), h('td', {}, x.students?.student_no), h('td', {}, x.attempt),
+        h('td', {}, h('b', {}, Number(x.score)), ` / ${Number(x.total)}`), h('td', {}, fmtDate(x.submitted_at)),
+        nums.map((n) => h('td', { style: okMark(x, n) === 'X' ? 'color:var(--bad)' : '' }, okMark(x, n)))))
+      : h('tr', {}, h('td', { colspan: 5 + nums.length, class: 'muted' }, '아직 제출한 학생이 없습니다.')),
+      list.length && h('tr', {}, h('td', { colspan: 5, class: 'muted' }, '문항별 정답률'), rate.map((r) => h('td', { class: 'muted' }, `${r}%`))))));
+
+  const download = () => {
+    const head = ['반', '번호', '이메일', '회차', '점수', '만점', '제출시각', ...nums.map((n) => `${n}번 정오`), ...nums.map((n) => `${n}번 답`)];
+    const byNum = Object.fromEntries(qs.map((q) => [q.num, q.id]));
+    const lines = list.map((x) => [x.students?.class_no, x.students?.student_no, x.students?.email, x.attempt, Number(x.score), Number(x.total),
+      new Date(x.submitted_at).toLocaleString('ko-KR'), ...nums.map((n) => okMark(x, n)), ...nums.map((n) => x.answers?.[byNum[n]] ?? '')]);
+    const csv = [head, ...lines].map((r) => r.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\r\n');
+    const a = h('a', { href: URL.createObjectURL(new Blob(['﻿' + csv], { type: 'text/csv' })), download: `${exam.title}_결과.csv` });
+    a.click(); URL.revokeObjectURL(a.href);
+  };
+
+  show(h('div', { class: 'card' },
+    h('div', { class: 'row' },
+      examPicker(renderResults),
+      h('label', { class: 'row small' }, bestOnly, '학생별 최고점만'),
+      h('span', { class: 'spacer' }),
+      h('button', { onclick: renderResults }, '새로고침'),
+      h('button', { class: 'primary', disabled: !list.length, onclick: download }, 'CSV 내려받기')),
+    h('p', {}, `응시 ${new Set(list.map((x) => x.user_id)).size}명 · 평균 ${avg.toFixed(1)} / ${total}점`),
+    table));
+}
+
+boot().catch((e) => notice(e.message));
+</script>
+</body>
+</html>

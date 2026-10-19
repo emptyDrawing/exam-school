@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>온라인 평가</title>
+<link rel="stylesheet" href="style.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js" integrity="sha384-GFr3yTh5lJznCbZfpTtXnwboFsxqtTQoeTZCRHhE0579KrRmlCzen5AA8ohaB5ug" crossorigin="anonymous"></script>
+<script src="config.js"></script>
+<script src="api.js"></script>
+</head>
+<body>
+<div id="demo"></div>
+<div class="wrap">
+  <header class="top">
+    <h1>온라인 평가</h1>
+    <div class="who" id="who"></div>
+  </header>
+  <div id="msg"></div>
+  <main id="main"><p class="muted">불러오는 중…</p></main>
+</div>
+
+<script>
+const api = window.ExamApi;
+const $main = document.getElementById('main');
+const $msg = document.getElementById('msg');
+const $who = document.getElementById('who');
+
+let me = null;          // my_status() 결과
+let exam = null;        // 진행 중인 시험 { exam, questions }
+let answers = {};       // { 문항id: 답 }
+let timer = null;
+
+function show(...nodes) { $main.replaceChildren(...nodes); window.scrollTo(0, 0); }
+function notice(text, kind = 'error') { $msg.replaceChildren(text ? h('div', { class: 'notice ' + kind }, text) : ''); }
+function busy(btn, on) { if (btn) { btn.disabled = on; } }
+
+// 응시 중 새로고침해도 답이 남도록 이 기기에만 임시 저장
+function draftKey() { return `exam-draft:${me.email}:${exam.exam.id}:${exam.exam.attempt}`; }
+function saveDraft() { try { localStorage.setItem(draftKey(), JSON.stringify(answers)); } catch (e) {} }
+function loadDraft() { try { return JSON.parse(localStorage.getItem(draftKey())) || {}; } catch (e) { return {}; } }
+function clearDraft() { try { localStorage.removeItem(draftKey()); } catch (e) {} }
+
+window.addEventListener('beforeunload', (e) => { if (exam) { e.preventDefault(); e.returnValue = ''; } });
+
+if (api.demo) {
+  document.getElementById('demo').append(h('div', { class: 'demo-bar' },
+    '데모 모드: 이 브라우저 안에서만 동작합니다.',
+    h('button', { onclick: () => { api.resetDemo(); location.reload(); } }, '데모 초기화'),
+    h('a', { href: 'teacher.html' + location.search, class: 'btn', style: 'font-size:12px;padding:2px 8px;margin-left:6px' }, '교사 화면')));
+}
+
+async function boot() {
+  const user = await api.user();
+  if (!user) return showLogin();
+  $who.replaceChildren(user.email, h('button', { onclick: logout }, '로그아웃'));
+  try {
+    me = await api.status();
+  } catch (e) {
+    notice(e.message);
+    return;
+  }
+  if (me.is_teacher) {
+    $who.prepend(h('a', { href: 'teacher.html' + location.search, class: 'btn' }, '교사 화면'));
+  }
+  if (!me.registered) return me.is_teacher ? showTeacherHint() : showRegister();
+  if (!me.approved) return showPending();
+  showList();
+}
+
+async function logout() {
+  if (exam && !confirm('응시 중입니다. 로그아웃할까요? (작성한 답은 이 기기에 임시 저장됩니다)')) return;
+  exam = null;
+  await api.signOut();
+  location.reload();
+}
+
+function showLogin() {
+  show(h('div', { class: 'card center' },
+    h('h2', {}, '구글 계정으로 로그인'),
+    h('p', { class: 'muted small' }, '본인의 구글 계정으로 로그인하세요. 처음 한 번만 반과 번호를 등록하면 됩니다.'),
+    h('button', { class: 'primary big', onclick: async (ev) => {
+      busy(ev.target, true);
+      try { await api.signIn(); } catch (e) { notice(e.message); busy(ev.target, false); }
+    } }, 'Google로 로그인')));
+}
+
+function showTeacherHint() {
+  show(h('div', { class: 'card' },
+    h('h2', {}, '교사 계정으로 로그인했습니다'),
+    h('p', {}, '시험 관리와 학생 승인은 교사 화면에서 합니다.'),
+    h('a', { href: 'teacher.html' + location.search, class: 'btn primary' }, '교사 화면으로')));
+}
+
+function showRegister() {
+  const cls = h('input', { type: 'number', min: 1, max: 30, inputmode: 'numeric', placeholder: '예: 3' });
+  const num = h('input', { type: 'number', min: 1, max: 60, inputmode: 'numeric', placeholder: '예: 15' });
+  const btn = h('button', { class: 'primary', onclick: async () => {
+    const c = Number(cls.value), n = Number(num.value);
+    if (!c || !n) return notice('반과 번호를 모두 입력해 주세요.');
+    if (!confirm(`${c}반 ${n}번으로 등록할까요?\n잘못 등록하면 선생님께 말씀드려야 고칠 수 있어요.`)) return;
+    busy(btn, true);
+    try { me = await api.register(c, n); notice(''); showPending(); }
+    catch (e) { notice(e.message); busy(btn, false); }
+  } }, '등록하기');
+  show(h('div', { class: 'card' },
+    h('h2', {}, '처음 한 번만, 반과 번호 등록'),
+    h('div', { class: 'grid2' },
+      h('label', { class: 'field' }, '반', cls),
+      h('label', { class: 'field' }, '번호', num)),
+    h('p', { class: 'muted small' }, '이름은 입력하지 않습니다. 등록 후 선생님이 확인하면 시험을 볼 수 있어요.'),
+    btn));
+}
+
+function showPending() {
+  show(h('div', { class: 'card center' },
+    h('h2', {}, '선생님 승인을 기다리는 중'),
+    h('p', {}, `${me.class_no}반 ${me.student_no}번으로 등록되었습니다.`),
+    h('p', { class: 'muted small' }, '선생님이 승인하면 아래 버튼을 눌러 확인하세요.'),
+    h('div', { class: 'row', style: 'justify-content:center' },
+      h('button', { class: 'primary', onclick: () => location.reload() }, '다시 확인'),
+      api.demo && h('button', { onclick: () => { api.approveMe(); location.reload(); } }, '(데모) 교사 승인 처리'))));
+}
+
+function stateBadge(x) {
+  if (x.used >= x.max_attempts) return h('span', { class: 'badge ok' }, '제출 완료');
+  if (x.state === 'before') return h('span', { class: 'badge warn' }, '시작 전');
+  if (x.state === 'after') return h('span', { class: 'badge' }, '종료');
+  return h('span', { class: 'badge ok' }, '응시 가능');
+}
+
+function showList() {
+  const items = me.exams.map((x) => {
+    const canStart = x.state === 'open' && x.used < x.max_attempts;
+    const when = [x.starts_at && `시작 ${fmtDate(x.starts_at)}`, x.ends_at && `마감 ${fmtDate(x.ends_at)}`].filter(Boolean).join(' · ');
+    return h('div', { class: 'exam-item' },
+      h('div', { class: 'title' }, x.title,
+        h('div', { class: 'muted small' }, [when, `응시 ${x.used}/${x.max_attempts}회`].filter(Boolean).join(' · '))),
+      stateBadge(x),
+      h('button', { class: 'primary', disabled: !canStart, onclick: (ev) => startExam(x.id, ev.target) }, '응시하기'));
+  });
+  show(h('div', { class: 'card' },
+    h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, '시험 목록'), h('span', { class: 'spacer' }),
+      h('span', { class: 'muted small' }, `${me.class_no}반 ${me.student_no}번`),
+      h('button', { onclick: () => location.reload() }, '새로고침')),
+    items.length ? items : h('p', { class: 'muted' }, '지금 열려 있는 시험이 없습니다.')));
+}
+
+async function startExam(id, btn) {
+  busy(btn, true);
+  try {
+    exam = await api.start(id);
+  } catch (e) {
+    notice(e.message); busy(btn, false); return;
+  }
+  notice('');
+  answers = loadDraft();
+  renderExam();
+}
+
+function renderExam() {
+  const { exam: info, questions } = exam;
+  const countEl = h('span', { class: 'muted small' });
+  const remainEl = h('span', { class: 'small' });
+  const updateCount = () => {
+    const done = questions.filter((q) => String(answers[q.id] ?? '').trim() !== '').length;
+    countEl.textContent = `${done} / ${questions.length} 문항 답함`;
+  };
+
+  const qNodes = questions.map((q, i) => {
+    let body;
+    if (q.kind === 'choice') {
+      body = q.options.map((o, j) => h('label', { class: 'opt' },
+        h('input', { type: 'radio', name: q.id, value: String(o.k), checked: String(answers[q.id]) === String(o.k),
+          onchange: () => { answers[q.id] = String(o.k); saveDraft(); updateCount(); } }),
+        h('span', {}, `${'①②③④⑤'[j]} ${o.t}`)));
+    } else {
+      body = h('input', { class: 'short', type: 'text', value: answers[q.id] ?? '', placeholder: '답을 입력하세요', autocomplete: 'off',
+        oninput: (ev) => { answers[q.id] = ev.target.value; saveDraft(); updateCount(); } });
+    }
+    return h('div', { class: 'q' },
+      h('div', { class: 'head' },
+        h('span', { class: 'no' }, `${i + 1}.`),
+        h('span', { class: 'prompt' }, q.prompt),
+        h('span', { class: 'pts' }, `${Number(q.points)}점`)),
+      body);
+  });
+
+  const submitBtn = h('button', { class: 'primary big', onclick: () => submitExam(submitBtn) }, '제출하기');
+  show(
+    h('div', { class: 'card' },
+      h('h2', {}, info.title),
+      h('p', { class: 'muted small', style: 'margin:0' },
+        `${info.attempt}/${info.max_attempts}회차 응시 · 작성한 답은 이 기기에 자동 임시 저장됩니다.`)),
+    h('div', { class: 'card' }, qNodes),
+    h('div', { class: 'sticky-bar' }, countEl, remainEl, h('span', { class: 'spacer' }), submitBtn));
+  updateCount();
+
+  clearInterval(timer);
+  if (info.ends_at) {
+    const tick = () => {
+      const left = Date.parse(info.ends_at) - Date.now();
+      if (left <= 0) { remainEl.textContent = '마감 시간이 지났습니다. 바로 제출하세요!'; remainEl.style.color = 'var(--bad)'; return; }
+      const m = Math.floor(left / 60000), s = Math.floor(left / 1000) % 60;
+      remainEl.textContent = `남은 시간 ${m}분 ${String(s).padStart(2, '0')}초`;
+      remainEl.style.color = left < 5 * 60000 ? 'var(--bad)' : '';
+    };
+    tick();
+    timer = setInterval(tick, 1000);
+  }
+}
+
+async function submitExam(btn) {
+  const empty = exam.questions.filter((q) => String(answers[q.id] ?? '').trim() === '').length;
+  const warn = empty ? `아직 답하지 않은 문항이 ${empty}개 있습니다.\n` : '';
+  if (!confirm(`${warn}제출하면 고칠 수 없습니다. 제출할까요?`)) return;
+  busy(btn, true);
+  try {
+    const res = await api.submit(exam.exam.id, answers);
+    clearDraft();
+    clearInterval(timer);
+    const done = exam;
+    exam = null;
+    showResult(done, res);
+  } catch (e) {
+    notice(e.message + (/로그인|JWT|token/i.test(e.message) ? ' — 답은 이 기기에 저장되어 있으니 다시 로그인한 뒤 제출하세요.' : ''));
+    busy(btn, false);
+    window.scrollTo(0, 0);
+  }
+}
+
+function showResult(done, res) {
+  const nodes = [h('h2', {}, '제출 완료'), h('p', { class: 'muted' }, done.exam.title)];
+  if (res.reveal === 'none') {
+    nodes.push(h('p', {}, '답안이 제출되었습니다. 결과는 선생님이 안내해 주실 거예요.'));
+  } else {
+    nodes.push(h('div', { class: 'score' }, `${Number(res.score)}`, h('span', { class: 'muted', style: 'font-size:22px' }, ` / ${Number(res.total)}점`)));
+  }
+  if (res.reveal === 'detail' && res.detail) {
+    const byNum = Object.fromEntries(done.questions.map((q, i) => [q.num, i + 1]));
+    nodes.push(h('div', { class: 'row', style: 'margin-top:12px' },
+      res.detail.slice().sort((a, b) => byNum[a.num] - byNum[b.num]).map((d) =>
+        h('span', { class: 'badge ' + (d.ok ? 'ok' : 'bad') }, `${byNum[d.num]}번 ${d.ok ? 'O' : 'X'}`))));
+  }
+  nodes.push(h('p', { class: 'muted small' }, `${res.attempt}/${res.max_attempts}회 응시했습니다.`));
+  nodes.push(h('button', { onclick: () => location.reload() }, '시험 목록으로'));
+  show(h('div', { class: 'card center' }, nodes));
+}
+
+boot().catch((e) => notice(e.message));
+</script>
+</body>
+</html>
