@@ -69,7 +69,7 @@ async function boot() {
   }
   exams = await guard(() => T.exams());
   currentExamId = exams[0]?.id ?? null;
-  const tabs = [['students', '학생 승인'], ['exams', '시험 · 문항'], ['results', '결과']];
+  const tabs = [['students', '학생 관리'], ['materials', '수업자료'], ['exams', '평가 · 문항'], ['results', '성적']];
   $tabs.hidden = false;
   $tabs.replaceChildren(...tabs.map(([k, label]) => h('button', { 'data-k': k, onclick: () => go(k) }, label)));
   go(location.hash.slice(1) || 'students');
@@ -79,7 +79,50 @@ function go(tab) {
   location.hash = tab;
   notice('');
   for (const b of $tabs.children) b.classList.toggle('on', b.dataset.k === tab);
-  ({ students: renderStudents, exams: renderExams, results: renderResults }[tab] || renderStudents)();
+  ({ students: renderStudents, materials: renderMaterials, exams: renderExams, results: renderResults }[tab] || renderStudents)();
+}
+
+// ---------- 수업자료 ----------
+// 자료 파일은 GitHub 저장소 docs/materials/단원폴더/ 에 올린다. 여기서는 목록 확인과 평가 연결만 한다.
+async function renderMaterials() {
+  const [items, links] = await Promise.all([guard(() => api.materials()), guard(() => T.links())]);
+  const linkOf = Object.fromEntries(links.map((l) => [l.path, l.exam_id]));
+  const repo = api.githubRepo;
+
+  const guide = h('div', { class: 'card' },
+    h('h2', {}, '자료 올리는 법'),
+    h('ol', { class: 'small', style: 'margin:0;padding-left:20px' },
+      h('li', {}, '제미나이 등에서 만든 웹앱을 .html 파일로 저장합니다. 파일 안의 <title> 이 자료 제목이 됩니다.'),
+      h('li', {}, '단원별 폴더(예: 1단원)에 파일을 넣고, 폴더째 GitHub 의 docs/materials 에 끌어다 놓은 뒤 Commit 합니다.'),
+      h('li', {}, '1~2분 뒤 이 목록과 학생 화면에 나타납니다. 지우거나 고칠 때도 GitHub 에서 파일을 지우거나 다시 올리면 됩니다.')),
+    repo && h('div', { class: 'row', style: 'margin-top:12px' },
+      h('a', { class: 'btn primary', href: `https://github.com/${repo}/upload/main/docs/materials`, target: '_blank', rel: 'noopener' }, 'GitHub 에 자료 올리기'),
+      h('a', { class: 'btn', href: `https://github.com/${repo}/tree/main/docs/materials`, target: '_blank', rel: 'noopener' }, '자료 폴더 보기 · 삭제'),
+      h('a', { class: 'btn', href: `https://github.com/${repo}/actions`, target: '_blank', rel: 'noopener' }, '배포 진행 상황')),
+    h('p', { class: 'small muted', style: 'margin-bottom:0' }, '⚠ 자료 파일은 주소를 알면 로그인 없이도 열 수 있습니다. 정답·개인정보가 든 파일은 올리지 마세요.'));
+
+  const examOptions = (path) => h('select', {
+    onchange: async (ev) => {
+      await guard(() => T.setLink(path, ev.target.value || null));
+      notice(ev.target.value ? '평가를 연결했습니다.' : '평가 연결을 해제했습니다.', 'ok');
+    },
+  },
+  h('option', { value: '' }, '— 평가 없음 —'),
+  exams.map((e) => h('option', { value: e.id, selected: linkOf[path] === e.id }, `${e.is_open ? '' : '(비공개) '}${e.title}`)));
+
+  const table = h('div', { class: 'table-wrap' }, h('table', {},
+    h('thead', {}, h('tr', {}, ['단원', '제목', '파일', '업데이트', '붙일 평가', ''].map((t) => h('th', {}, t)))),
+    h('tbody', {}, items.length ? items.map((it) => h('tr', {},
+      h('td', {}, it.unit), h('td', { class: 'wrap-text' }, it.title), h('td', { class: 'muted' }, it.path),
+      h('td', {}, fmtDate(it.updated_at)), h('td', {}, examOptions(it.path)),
+      h('td', {}, h('a', { class: 'btn', href: api.materialUrl(it.path), target: '_blank', rel: 'noopener' }, '보기'))))
+      : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, '아직 올라온 자료가 없습니다.')))));
+
+  show(guide, h('div', { class: 'card' },
+    h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, `수업자료 ${items.length}개`), h('span', { class: 'spacer' }),
+      h('button', { onclick: renderMaterials }, '새로고침')),
+    h('p', { class: 'small muted' }, '자료에 평가를 붙이면 학생이 자료를 본 뒤 바로 평가로 넘어갈 수 있습니다. 평가는 [평가 · 문항] 탭에서 \'학생에게 공개\'가 켜져 있어야 보입니다.'),
+    table));
 }
 
 // ---------- 학생 승인 ----------

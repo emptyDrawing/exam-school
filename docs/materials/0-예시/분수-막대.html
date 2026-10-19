@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>[예시] 분수 막대로 크기 비교하기</title>
+<style>
+  body { font-family: "Malgun Gothic", system-ui, sans-serif; margin: 0; padding: 24px; background: #f7f8fb; color: #1c2024; }
+  .box { max-width: 560px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 24px; border: 1px solid #e2e5ea; }
+  .bar { display: flex; height: 44px; border: 2px solid #2f6fde; border-radius: 6px; overflow: hidden; margin: 12px 0 4px; }
+  .bar div { flex: 1; border-right: 1px solid #2f6fde; }
+  .bar div:last-child { border-right: 0; }
+  .bar .on { background: #8fb2f2; }
+  label { display: block; margin-top: 16px; }
+  input[type=range] { width: 100%; }
+  .big { font-size: 28px; font-weight: 700; }
+  button { font: inherit; padding: 8px 14px; border-radius: 8px; border: 1px solid #ccd; background: #fff; cursor: pointer; margin: 4px 4px 0 0; }
+  #fb { margin-top: 12px; min-height: 1.5em; }
+</style>
+</head>
+<body>
+<div class="box">
+  <h2>분수 막대로 크기 비교하기</h2>
+  <p>슬라이더로 분모와 분자를 바꾸며 막대를 관찰해 보세요.</p>
+  <div class="big" id="frac"></div>
+  <div class="bar" id="bar"></div>
+  <label>분모 <span id="dv"></span><input type="range" id="d" min="2" max="12" value="4"></label>
+  <label>분자 <span id="nv"></span><input type="range" id="n" min="0" max="4" value="1"></label>
+  <h3>확인 질문</h3>
+  <p>1/2 와 2/4 는 크기가 같을까요?</p>
+  <button onclick="check(true)">같다</button><button onclick="check(false)">다르다</button>
+  <div id="fb"></div>
+  <p style="color:#888;font-size:13px">방문 횟수: <span id="visits"></span></p>
+</div>
+<script>
+  const d = document.getElementById('d'), n = document.getElementById('n');
+  function draw() {
+    n.max = d.value;
+    if (+n.value > +d.value) n.value = d.value;
+    document.getElementById('dv').textContent = d.value;
+    document.getElementById('nv').textContent = n.value;
+    document.getElementById('frac').textContent = n.value + ' / ' + d.value;
+    const bar = document.getElementById('bar');
+    bar.innerHTML = '';
+    for (let i = 0; i < d.value; i++) {
+      const c = document.createElement('div');
+      if (i < n.value) c.className = 'on';
+      bar.appendChild(c);
+    }
+  }
+  function check(same) {
+    document.getElementById('fb').textContent = same
+      ? '맞아요! 분모 2를 4로 나누면 칸이 2배가 되고, 색칠한 칸도 2배가 돼요.'
+      : '막대를 직접 만들어 보세요. 분모 2·분자 1, 그리고 분모 4·분자 2를 비교해 볼까요?';
+  }
+  d.oninput = n.oninput = draw;
+  draw();
+  // 많은 AI 생성 앱이 localStorage 를 씁니다. 자료 보기 화면(샌드박스)에서도 오류 없이 동작하는지 확인용.
+  const v = Number(localStorage.getItem('visits') || 0) + 1;
+  localStorage.setItem('visits', v);
+  document.getElementById('visits').textContent = v;
+</script>
+</body>
+</html>

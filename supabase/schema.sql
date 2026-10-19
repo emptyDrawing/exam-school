@@ -340,6 +340,45 @@ begin
 end;
 $$;
 
+-- ---------- 수업자료 ↔ 평가 연결 ----------
+-- 자료 파일은 GitHub 저장소 docs/materials/ 에 있고, 여기에는 "어느 자료에 어느 평가를 붙였는지"만 둔다.
+-- path 는 docs/materials/ 아래 경로 (예: 1단원/개념확인.html)
+
+create table if not exists public.material_links (
+  path    text primary key,
+  exam_id uuid not null references public.exams(id) on delete cascade
+);
+
+alter table public.material_links enable row level security;
+drop policy if exists teacher_all on public.material_links;
+create policy teacher_all on public.material_links for all to authenticated using (public.is_teacher()) with check (public.is_teacher());
+
+-- 학생용: 자료별로 붙어 있는 (공개된) 평가와 내 응시 상태
+create or replace function public.material_links_for_me()
+returns jsonb
+language plpgsql stable security definer set search_path = public
+as $$
+declare
+  v_s students;
+begin
+  v_s := _require_student();
+  return coalesce((
+    select jsonb_object_agg(l.path, jsonb_build_object(
+             'id', e.id,
+             'title', e.title,
+             'max_attempts', e.max_attempts,
+             'used', (select count(*) from submissions x
+                       where x.exam_id = e.id and x.user_id = v_s.user_id),
+             'state', case
+                        when e.starts_at is not null and now() < e.starts_at then 'before'
+                        when e.ends_at   is not null and now() > e.ends_at   then 'after'
+                        else 'open' end))
+      from material_links l
+      join exams e on e.id = l.exam_id
+     where e.is_open), '{}'::jsonb);
+end;
+$$;
+
 -- ---------- 함수 실행 권한 ----------
 -- Supabase 는 새 함수를 기본으로 anon/authenticated 에 열어 두므로 명시적으로 정리한다.
 
@@ -350,12 +389,14 @@ revoke all on function public.my_status()              from public, anon;
 revoke all on function public.register_student(int, int) from public, anon;
 revoke all on function public.start_exam(uuid)         from public, anon;
 revoke all on function public.submit_exam(uuid, jsonb) from public, anon;
+revoke all on function public.material_links_for_me()  from public, anon;
 
 grant execute on function public.is_teacher()               to authenticated;
 grant execute on function public.my_status()                to authenticated;
 grant execute on function public.register_student(int, int) to authenticated;
 grant execute on function public.start_exam(uuid)           to authenticated;
 grant execute on function public.submit_exam(uuid, jsonb)   to authenticated;
+grant execute on function public.material_links_for_me()    to authenticated;
 
 -- ---------- 교사 등록 (본인 Gmail 로 바꾸세요, 소문자) ----------
 insert into public.teachers (email) values ('teacher@gmail.com')

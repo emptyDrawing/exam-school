@@ -5,6 +5,29 @@
   const cfg = window.EXAM_CONFIG || {};
   const isDemo = new URLSearchParams(location.search).has('demo') || !cfg.SUPABASE_URL;
 
+  // ---------------- 수업자료 (GitHub Pages 의 materials 폴더) ----------------
+  // 목록(materials/index.json)은 배포할 때 tools/build-materials.mjs 가 만든다.
+  async function loadMaterials() {
+    const res = await fetch('materials/index.json', { cache: 'no-cache' });
+    if (res.status === 404) return [];
+    if (!res.ok) throw new Error('수업자료 목록을 불러오지 못했습니다.');
+    return (await res.json()).items || [];
+  }
+  const materialUrl = (path) => 'materials/' + path.split('/').map(encodeURIComponent).join('/');
+
+  // 자료를 샌드박스 iframe(srcdoc)으로 보여주기 위해 HTML 을 고친다.
+  //  - <base>: 자료 안의 상대 경로(이미지 등)가 원래 폴더 기준으로 열리도록
+  //  - storage 대체: 샌드박스에서는 localStorage 접근이 막혀 오류가 나므로 메모리 저장소로 바꿔 끼움
+  // 샌드박스(allow-same-origin 없음)라서 자료 코드는 이 사이트의 로그인 정보에 접근할 수 없다.
+  async function materialDoc(path) {
+    const res = await fetch(materialUrl(path), { cache: 'no-cache' });
+    if (!res.ok) throw new Error('자료 파일을 열 수 없습니다.');
+    const html = await res.text();
+    const base = new URL(materialUrl(path), location.href).href.replace(/[^/]*$/, '');
+    const shim = '<base href="' + base + '"><script>(function(){function m(){var d={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null},setItem:function(k,v){d[k]=String(v)},removeItem:function(k){delete d[k]},clear:function(){d={}},key:function(i){return Object.keys(d)[i]||null},get length(){return Object.keys(d).length}}}["localStorage","sessionStorage"].forEach(function(n){try{window[n].length}catch(e){try{Object.defineProperty(window,n,{value:m(),configurable:true})}catch(_){}}})})();<\/script>';
+    return /<head[^>]*>/i.test(html) ? html.replace(/<head[^>]*>/i, (m) => m + shim) : shim + html;
+  }
+
   // ---------------- 실제 모드 (Supabase) ----------------
   function supabaseApi() {
     const sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
@@ -41,6 +64,8 @@
       register: (classNo, studentNo) => rpc('register_student', { p_class: classNo, p_no: studentNo }),
       start: (examId) => rpc('start_exam', { p_exam: examId }),
       submit: (examId, answers) => rpc('submit_exam', { p_exam: examId, p_answers: answers }),
+      materials: loadMaterials,
+      materialLinks: () => rpc('material_links_for_me'),
 
       teacher: {
         students: () => run(sb.from('students').select('*').order('class_no').order('student_no')),
@@ -66,6 +91,11 @@
           .select('*, students(class_no, student_no, email)')
           .eq('exam_id', examId)
           .order('submitted_at')),
+
+        links: () => run(sb.from('material_links').select('*')),
+        setLink: (path, examId) => examId
+          ? run(sb.from('material_links').upsert({ path, exam_id: examId }))
+          : run(sb.from('material_links').delete().eq('path', path)),
       },
     };
   }
@@ -73,7 +103,7 @@
   // ---------------- 데모 모드 (브라우저 저장소) ----------------
   // DB 함수(schema.sql)와 같은 규칙을 흉내 낸다. 화면 미리보기용.
   function demoApi() {
-    const KEY = 'exam-demo-db-v1';
+    const KEY = 'exam-demo-db-v2';
     const ME = { student: 'student@demo', teacher: 'teacher@demo' };
     const role = location.pathname.endsWith('teacher.html') ? 'teacher' : 'student';
     const uid = (email) => 'u-' + email;
@@ -82,6 +112,7 @@
       const ex = 'ex-1';
       return {
         signedIn: false,
+        links: { '0-예시/분수-막대.html': ex },
         exams: [{
           id: ex, title: '[데모] 1단원 형성평가', starts_at: null, ends_at: null, max_attempts: 2,
           reveal: 'detail', shuffle_questions: false, shuffle_options: false, is_open: true,
@@ -190,6 +221,16 @@
         if (e.shuffle_questions) qs = shuffle(qs);
         return wait({ exam: { id: e.id, title: e.title, ends_at: e.ends_at, attempt: n + 1, max_attempts: e.max_attempts }, questions: qs });
       },
+      materials: loadMaterials,
+      async materialLinks() {
+        const s = requireStudent();
+        const out = {};
+        for (const [path, examId] of Object.entries(load().links || {})) {
+          const e = load().exams.find((x) => x.id === examId && x.is_open);
+          if (e) out[path] = { id: e.id, title: e.title, max_attempts: e.max_attempts, used: used(e.id, s.user_id), state: examState(e) };
+        }
+        return wait(out);
+      },
       async submit(examId, answers) {
         const s = requireStudent();
         const db = load();
@@ -237,6 +278,13 @@
             .concat(rows.map((r, i) => ({ ...r, id: 'q-' + Date.now() + '-' + i, exam_id: examId })));
           save(); return wait(null);
         },
+        async links() { return wait(Object.entries(T().links || {}).map(([path, exam_id]) => ({ path, exam_id }))); },
+        async setLink(path, examId) {
+          const db = T();
+          db.links = db.links || {};
+          if (examId) db.links[path] = examId; else delete db.links[path];
+          save(); return wait(null);
+        },
         async submissions(examId) {
           const db = T();
           return wait(db.submissions.filter((x) => x.exam_id === examId).map((x) => {
@@ -249,6 +297,9 @@
   }
 
   window.ExamApi = isDemo ? demoApi() : supabaseApi();
+  window.ExamApi.materialUrl = materialUrl;
+  window.ExamApi.materialDoc = materialDoc;
+  window.ExamApi.githubRepo = cfg.GITHUB_REPO || '';
 
   // ---------------- 화면 공통 도우미 ----------------
   // h('div', { class: 'x', onclick: fn }, '글자', 자식요소...)

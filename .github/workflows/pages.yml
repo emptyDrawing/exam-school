@@ -1,0 +1,36 @@
+# main 에 올라올 때마다: 수업자료 목록(index.json)을 만들고 docs 폴더를 GitHub Pages 로 배포한다.
+# 저장소 Settings > Pages > Source 를 "GitHub Actions" 로 두어야 한다.
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 자료별 마지막 수정 시각을 git 기록에서 읽기 위해
+      - name: 수업자료 목록 만들기
+        run: node tools/build-materials.mjs docs/materials
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deployment
+        uses: actions/deploy-pages@v4

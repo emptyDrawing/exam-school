@@ -4,4 +4,5 @@
 window.EXAM_CONFIG = {
   SUPABASE_URL: '',       // 예: https://abcdefghijkl.supabase.co
   SUPABASE_ANON_KEY: '',  // 예: eyJhbGciOi...
+  GITHUB_REPO: 'emptyDrawing/exam-school',  // 교사 화면의 '자료 올리기' 링크에 사용 (계정/저장소)
 };

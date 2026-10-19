@@ -129,7 +129,67 @@ function stateBadge(x) {
   return h('span', { class: 'badge ok' }, '응시 가능');
 }
 
+// 학생 홈: [수업자료] [평가] 두 탭
 function showList() {
+  const tab = location.hash === '#exams' ? 'exams' : 'materials';
+  const head = h('div', { class: 'row', style: 'margin-bottom:8px' },
+    h('span', { class: 'muted small' }, `${me.class_no}반 ${me.student_no}번`),
+    h('span', { class: 'spacer' }),
+    h('button', { onclick: () => location.reload() }, '새로고침'));
+  const tabs = h('nav', { class: 'tabs' },
+    [['materials', '수업자료'], ['exams', `평가${openCount() ? ` (${openCount()})` : ''}`]].map(([k, label]) =>
+      h('button', { class: tab === k ? 'on' : '', onclick: () => { location.hash = k; showList(); } }, label)));
+  const body = h('div', {}, h('p', { class: 'muted' }, '불러오는 중…'));
+  show(head, tabs, body);
+  if (tab === 'exams') body.replaceChildren(examListCard());
+  else materialList().then((n) => body.replaceChildren(n)).catch((e) => body.replaceChildren(h('div', { class: 'notice error' }, e.message)));
+}
+
+function openCount() { return me.exams.filter((x) => x.state === 'open' && x.used < x.max_attempts).length; }
+
+let materialsCache = null;
+async function materialList() {
+  if (!materialsCache) {
+    const [items, links] = await Promise.all([api.materials(), api.materialLinks()]);
+    materialsCache = { items, links };
+  }
+  const { items, links } = materialsCache;
+  if (!items.length) return h('div', { class: 'card muted' }, '아직 올라온 수업자료가 없습니다.');
+  const groups = new Map();
+  for (const it of items) { if (!groups.has(it.unit)) groups.set(it.unit, []); groups.get(it.unit).push(it); }
+  return h('div', {}, [...groups].map(([unit, list]) => h('div', { class: 'card' },
+    h('h2', {}, unit),
+    list.map((it) => {
+      const ex = links[it.path];
+      return h('div', { class: 'exam-item' },
+        h('div', { class: 'title' }, it.title, h('div', { class: 'muted small' }, `업데이트 ${fmtDate(it.updated_at)}`)),
+        ex && h('span', { class: 'badge ' + (ex.used >= ex.max_attempts ? 'ok' : 'warn') }, ex.used >= ex.max_attempts ? '평가 완료' : '평가 있음'),
+        h('button', { class: 'primary', onclick: () => showMaterial(it) }, '열기'));
+    }))));
+}
+
+async function showMaterial(it) {
+  const ex = materialsCache.links[it.path];
+  const frame = h('iframe', {
+    title: it.title,
+    sandbox: 'allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads',
+    style: 'width:100%;height:calc(100vh - 210px);min-height:480px;border:1px solid var(--line);border-radius:var(--radius);background:#fff',
+  });
+  const canExam = ex && ex.state === 'open' && ex.used < ex.max_attempts;
+  show(
+    h('div', { class: 'row', style: 'margin-bottom:12px' },
+      h('button', { onclick: () => { location.hash = 'materials'; showList(); } }, '← 목록'),
+      h('b', { style: 'flex:1;min-width:160px' }, it.title),
+      h('button', { onclick: () => frame.requestFullscreen?.() }, '전체화면'),
+      h('a', { class: 'btn', href: api.materialUrl(it.path), download: it.path.split('/').pop() }, '내려받기'),
+      ex && h('button', { class: 'primary', disabled: !canExam, onclick: (ev) => startExam(ex.id, ev.target) },
+        ex.used >= ex.max_attempts ? '평가 완료' : ex.state === 'before' ? '평가 시작 전' : ex.state === 'after' ? '평가 종료' : `평가 보기: ${ex.title}`)),
+    frame);
+  try { frame.srcdoc = await api.materialDoc(it.path); }
+  catch (e) { notice(e.message); }
+}
+
+function examListCard() {
   const items = me.exams.map((x) => {
     const canStart = x.state === 'open' && x.used < x.max_attempts;
     const when = [x.starts_at && `시작 ${fmtDate(x.starts_at)}`, x.ends_at && `마감 ${fmtDate(x.ends_at)}`].filter(Boolean).join(' · ');
@@ -139,11 +199,8 @@ function showList() {
       stateBadge(x),
       h('button', { class: 'primary', disabled: !canStart, onclick: (ev) => startExam(x.id, ev.target) }, '응시하기'));
   });
-  show(h('div', { class: 'card' },
-    h('div', { class: 'row' }, h('h2', { style: 'margin:0' }, '시험 목록'), h('span', { class: 'spacer' }),
-      h('span', { class: 'muted small' }, `${me.class_no}반 ${me.student_no}번`),
-      h('button', { onclick: () => location.reload() }, '새로고침')),
-    items.length ? items : h('p', { class: 'muted' }, '지금 열려 있는 시험이 없습니다.')));
+  return h('div', { class: 'card' },
+    items.length ? items : h('p', { class: 'muted', style: 'margin:0' }, '지금 열려 있는 평가가 없습니다.'));
 }
 
 async function startExam(id, btn) {
